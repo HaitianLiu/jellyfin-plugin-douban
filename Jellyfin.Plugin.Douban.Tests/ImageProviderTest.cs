@@ -25,16 +25,18 @@ namespace Jellyfin.Plugin.Douban.Tests
         }
 
         [Fact]
-        public void TestGetBackdrop()
+        public async void TestGetImageResponse()
         {
             // Test 1:
-            var list = _imageProvider.GetBackdrop("5350027", CancellationToken.None).Result;
-            foreach (var item in list)
-            {
-                Console.WriteLine(item.Url);
-                Console.WriteLine(item.Type);
-            }
-            Assert.Single(list);
+            var image = await _imageProvider.GetImageResponse("https://movie.douban.com/subject/11537954/photos?type=R", CancellationToken.None);
+            Console.WriteLine(image);
+            // var list = _imageProvider.GetBackdrop("5350027", CancellationToken.None).Result;
+            // foreach (var item in list)
+            // {
+            //     Console.WriteLine(item.Url);
+            //     Console.WriteLine(item.Type);
+            // }
+            // Assert.Single(list);
         }
     }
 }

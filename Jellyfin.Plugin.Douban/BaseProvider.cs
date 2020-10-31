@@ -4,14 +4,12 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Net;
 using MediaBrowser.Model.Serialization;
-
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.Douban
@@ -27,6 +25,10 @@ namespace Jellyfin.Plugin.Douban
         protected Configuration.PluginConfiguration _config;
         protected DoubanAccessor _doubanAccessor;
 
+        private const string SearchApi = "/api/v2/search/movie";
+
+        private const string ItemApi = "/api/v2";
+
         protected BaseProvider(IHttpClient httpClient,
             IJsonSerializer jsonSerializer, ILogger logger)
         {
@@ -34,11 +36,11 @@ namespace Jellyfin.Plugin.Douban
             this._jsonSerializer = jsonSerializer;
             this._logger = logger;
             this._config = Plugin.Instance == null ?
-                               new Configuration.PluginConfiguration() :
-                               Plugin.Instance.Configuration;
+                new Configuration.PluginConfiguration() :
+                Plugin.Instance.Configuration;
 
             this._doubanAccessor = new DoubanAccessor(_httpClient, _logger,
-                                                      _config.MinRequestInternalMs);
+                _config.MinRequestInternalMs);
         }
 
         public Task<HttpResponseInfo> GetImageResponse(string url,
@@ -52,11 +54,11 @@ namespace Jellyfin.Plugin.Douban
             });
         }
 
-        protected async Task<IEnumerable<string>> SearchSidByName(string name,
+        protected async Task<IEnumerable<string>> SearchSidByName(string name, string type,
             CancellationToken cancellationToken)
         {
             _logger.LogInformation("Douban: Trying to search sid by name: {0}",
-                                   name);
+                name);
 
             var sidList = new List<string>();
 
@@ -66,38 +68,41 @@ namespace Jellyfin.Plugin.Douban
                 return sidList;
             }
 
-            // TODO: Change to use the search api instead of parsing by HTML
-            // when the search api is available.
-            var url = String.Format("http://www.douban.com/search?cat={0}&q={1}", "1002", name);
+            Dictionary<string, string> queryParams = new Dictionary<string, string>();
+            queryParams.Add("q", name);
+            queryParams.Add("count", "20");
+
             try
             {
-                String content = await _doubanAccessor.GetResponseWithDelay(url,
-                                 cancellationToken);
-                String pattern = @"sid: (\d+)";
-                Match match = Regex.Match(content, pattern);
+                var response = await _doubanAccessor.Request(SearchApi, queryParams, cancellationToken);
 
-                while (match.Success)
+                Response.SearchResult result = _jsonSerializer.DeserializeFromString<Response.SearchResult>(response);
+
+                if (result.Total > 0)
                 {
-                    var sid = match.Groups[1].Value;
-                    _logger.LogDebug("The sid of {0} is {1}", name, sid);
-                    sidList.Add(sid);
 
-                    match = match.NextMatch();
+                    foreach (Response.SearchSubject subject in result.Items)
+                    {
+                        if (subject.Target_Type == type)
+                        {
+                            sidList.Add(subject.Target.Id);
+                        }
+                    }
                 }
             }
             catch (HttpException e)
             {
                 _logger.LogError("Could not access url: {0}, status code: {1}",
-                                 url, e.StatusCode);
+                    SearchApi, e.StatusCode);
                 throw e;
             }
-            // To avoid timeout by too many search results, just limit the result to 7.
-            return sidList.Distinct().Take(7).ToList();
+
+            return sidList;
         }
 
         protected async Task<MetadataResult<T>> GetMetaFromDouban<T>(string sid,
             string type, CancellationToken cancellationToken)
-            where T : BaseItem, new()
+        where T : BaseItem, new()
         {
             _logger.LogInformation("Trying to get item by sid: {0} and type {1}", sid, type);
             var result = new MetadataResult<T>();
@@ -108,7 +113,7 @@ namespace Jellyfin.Plugin.Douban
                 return result;
             }
 
-            var data = await GetDoubanSubject(sid, cancellationToken);
+            var data = await GetDoubanSubject(sid, type, cancellationToken);
             if (!String.IsNullOrEmpty(type) && data.Subtype != type)
             {
                 _logger.LogInformation("Douban: Sid {1}'s type is {2}, " +
@@ -118,19 +123,21 @@ namespace Jellyfin.Plugin.Douban
 
             result.Item = TransMediaInfo<T>(data);
             TransPersonInfo(data.Directors, PersonType.Director).ForEach(result.AddPerson);
-            TransPersonInfo(data.Casts, PersonType.Actor).ForEach(result.AddPerson);
-            TransPersonInfo(data.Writers, PersonType.Writer).ForEach(result.AddPerson);
+            TransPersonInfo(data.Actors, PersonType.Actor).ForEach(result.AddPerson);
+            // TODO: 编剧
+            // TransPersonInfo(data.Writers, PersonType.Writer).ForEach(result.AddPerson);
 
             result.QueriedById = true;
             result.HasMetadata = true;
+            result.ResultLanguage = "zh";
 
             _logger.LogInformation("Douban: The name of sid {0} is {1}",
                 sid, result.Item.Name);
             return result;
         }
 
-        internal async Task<Response.Subject> GetDoubanSubject(string sid,
-                                         CancellationToken cancellationToken)
+        internal async Task<Response.Subject> GetDoubanSubject(string sid, string type,
+            CancellationToken cancellationToken)
         {
             _logger.LogInformation("Douban: Trying to get douban subject by " +
                 "sid: {0}", sid);
@@ -141,39 +148,52 @@ namespace Jellyfin.Plugin.Douban
                 throw new ArgumentException("sid is empty when getting subject");
             }
 
-            String apikey = _config.ApiKey;
-            var url = String.Format("http://api.douban.com/v2/movie/subject" +
-                "/{0}?apikey={1}", sid, apikey);
+            String response = await _doubanAccessor.Request($"{ItemApi}/{type}/{sid}", new Dictionary<string, string>(), cancellationToken);
 
-
-            String content = await _doubanAccessor.GetResponse(url, cancellationToken);
-            var data = _jsonSerializer.DeserializeFromString<Response.Subject>(content);
+            Response.Subject subject = _jsonSerializer.DeserializeFromString<Response.Subject>(response);
 
             _logger.LogInformation("Get douban subject {0} successfully: {1}",
-                                   sid, data.Title);
-            return data;
+                sid, subject.Title);
+            return subject;
         }
 
         private T TransMediaInfo<T>(Response.Subject data)
-            where T : BaseItem, new()
+        where T : BaseItem, new()
         {
             var media = new T
             {
                 Name = data.Title,
                 OriginalTitle = data.Original_Title,
-                CommunityRating = data.Rating.Average,
-                Overview = data.Summary.Replace("\n", "</br>"),
+                CommunityRating = data.Rating?.Value,
+                Overview = data.Intro.Replace("\n", "</br>"),
                 ProductionYear = int.Parse(data.Year),
-                HomePageUrl = data.Alt,
-                ProductionLocations = data.Countries.ToArray()
+                HomePageUrl = data.Url,
+                ProductionLocations = data.Countries?.ToArray()
             };
 
-            if (!String.IsNullOrEmpty(data.Pubdate))
+            if (data.Pubdate?.Count > 0 && !String.IsNullOrEmpty(data.Pubdate[0]))
             {
-                media.PremiereDate = DateTime.Parse(data.Pubdate);
+                string pubdate;
+                if (data.Pubdate[0].IndexOf("(") != -1)
+                {
+                    pubdate = data.Pubdate[0].Substring(0, data.Pubdate[0].IndexOf("("));
+                }
+                else
+                {
+                    pubdate = data.Pubdate[0];
+                }
+                DateTime dateValue;
+                if (DateTime.TryParse(pubdate, out dateValue))
+                {
+                    media.PremiereDate = dateValue;
+                }
             }
 
-            data.Trailer_Urls.ForEach(item => media.AddTrailerUrl(item));
+            if (data.Trailer != null)
+            {
+                media.AddTrailerUrl(data.Trailer.Video_Url);
+            }
+
             data.Genres.ForEach(media.AddGenre);
 
             return media;
@@ -189,7 +209,8 @@ namespace Jellyfin.Plugin.Douban
                 {
                     Name = person.Name,
                     Type = personType,
-                    ImageUrl = person.Avatars?.Large,
+                    ImageUrl = person.Avatar?.Large,
+                    Role = person.Roles[0]
                 };
 
                 personInfo.SetProviderId(ProviderID, person.Id);

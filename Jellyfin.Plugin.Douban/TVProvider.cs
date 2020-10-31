@@ -39,9 +39,7 @@ namespace Jellyfin.Plugin.Douban
             _logger.LogInformation($"sid: {sid}");
             if (string.IsNullOrWhiteSpace(sid))
             {
-                // Get subject id firstly
-                var sidList = await SearchSidByName(info.Name,
-                    cancellationToken).ConfigureAwait(false);
+                var sidList = await SearchSidByName(info.Name, "tv", cancellationToken).ConfigureAwait(false);
                 foreach (var s in sidList)
                 {
                     _logger.LogDebug($"sidList: {s}");
@@ -86,25 +84,24 @@ namespace Jellyfin.Plugin.Douban
             }
             else
             {
-                sidList = await SearchSidByName(info.Name, cancellationToken).
-                    ConfigureAwait(false);
+                sidList = await SearchSidByName(info.Name, "tv", cancellationToken).ConfigureAwait(false);
             }
 
             foreach (String sid in sidList)
             {
-                var subject = await GetDoubanSubject(sid, cancellationToken).
+                var itemData = await GetDoubanSubject(sid, "tv", cancellationToken).
                     ConfigureAwait(false);
-                if (subject.Subtype != "tv")
+                if (itemData.Subtype != "tv")
                 {
                     continue;
                 }
 
                 var searchResult = new RemoteSearchResult()
                 {
-                    Name = subject.Title,
-                    ImageUrl = subject.Images.Large,
-                    Overview = subject.Summary,
-                    ProductionYear = int.Parse(subject.Year),
+                    Name = itemData.Title,
+                    ImageUrl = itemData.Images.Large,
+                    Overview = itemData.Intro,
+                    ProductionYear = int.Parse(itemData.Year),
                 };
                 searchResult.SetProviderId(ProviderID, sid);
                 results.Add(searchResult);
@@ -134,14 +131,14 @@ namespace Jellyfin.Plugin.Douban
                 return result;
             }
 
-            var subject = await GetDoubanSubject(sid, cancellationToken).
+            var itemData = await GetDoubanSubject(sid, "tv", cancellationToken).
                 ConfigureAwait(false);
-            if (subject.Current_Season.HasValue)
+            if (itemData.Current_Season.HasValue)
             {
                 result.Item = new Season
                 {
-                    IndexNumber = subject.Current_Season.Value,
-                    ProductionYear = int.Parse(subject.Year)
+                    IndexNumber = itemData.Current_Season.Value,
+                    ProductionYear = int.Parse(itemData.Year)
                 };
                 result.HasMetadata = true;
             }
@@ -195,7 +192,7 @@ namespace Jellyfin.Plugin.Douban
 
             var url = String.Format("https://movie.douban.com/subject/{0}" +
                 "/episode/{1}/", sid, info.IndexNumber);
-            String content = await _doubanAccessor.GetResponseWithDelay(url, cancellationToken);
+            String content = await _doubanAccessor.GetResponseWithDelay(url, new Dictionary<string, string>(), cancellationToken);
             String pattern_name = "data-name=\\\"(.*?)\\\"";
             Match match = Regex.Match(content, pattern_name);
             if (match.Success)

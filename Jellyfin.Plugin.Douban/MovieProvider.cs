@@ -34,8 +34,7 @@ namespace Jellyfin.Plugin.Douban
             var sid = info.GetProviderId(ProviderID);
             if (string.IsNullOrWhiteSpace(sid))
             {
-                // Get subject id firstly
-                var sidList = await SearchSidByName(info.Name,
+                var sidList = await SearchSidByName(info.Name, "movie",
                     cancellationToken).ConfigureAwait(false);
                 sid = sidList.FirstOrDefault();
             }
@@ -76,25 +75,25 @@ namespace Jellyfin.Plugin.Douban
             }
             else
             {
-                sidList = await SearchSidByName(info.Name, cancellationToken).
+                sidList = await SearchSidByName(info.Name, "movie", cancellationToken).
                     ConfigureAwait(false);
             }
 
             foreach (String sid in sidList)
             {
-                var subject = await GetDoubanSubject(sid, cancellationToken).
+                var itemData = await GetDoubanSubject(sid, "movie", cancellationToken).
                     ConfigureAwait(false);
-                if (subject.Subtype != "movie")
+                if (itemData.Subtype != "movie")
                 {
                     continue;
                 }
 
                 var searchResult = new RemoteSearchResult()
                 {
-                    Name = subject.Title,
-                    ImageUrl = subject.Images.Large,
-                    Overview = subject.Summary,
-                    ProductionYear = int.Parse(subject.Year),
+                    Name = itemData.Title,
+                    ImageUrl = itemData.Images.Large,
+                    Overview = itemData.Intro,
+                    ProductionYear = int.Parse(itemData.Year),
                 };
                 searchResult.SetProviderId(ProviderID, sid);
                 results.Add(searchResult);

@@ -1,7 +1,9 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
+using System.Web;
+using System.Text;
+using System.Collections.Generic;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Net;
@@ -18,33 +20,21 @@ namespace Jellyfin.Plugin.Douban
         private static readonly Random _random = new Random();
         // It's used to store the last access time, to reduce the access frequency.
         private static long _lastAccessTime = 0;
-        
+
         // It's used to store the value of BID in cookie.
-        private static string _doubanBid = "";
+        // private static string _doubanBid = "";
 
         private static readonly SemaphoreSlim _locker = new SemaphoreSlim(1, 1);
 
-        // Used as the user agent when access Douban.
-        private static readonly string[] _userAgentList = {
-            "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/40.0.2214.93 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 6.1; rv:6.0) Gecko/20100101 Firefox/19.0",
-            "Mozilla/5.0 (Windows NT 6.2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1464.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:22.0) Gecko/20130328 Firefox/22.0",
-            "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/40.0.2214.93 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:31.0) Gecko/20130401 Firefox/31.0",
-            "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:23.0) Gecko/20131011 Firefox/23.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_7_3) AppleWebKit/534.55.3 (KHTML, like Gecko) Version/5.1.3 Safari/534.53.10",
-            "Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10_6_5; ar) AppleWebKit/533.19.4 (KHTML, like Gecko) Version/5.0.3 Safari/533.19.4",
-            "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/40.0.2214.93 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 6.2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1467.0 Safari/537.36"
-        };
+        private const string UserAgent = "api-client/1 com.douban.frodo/6.42.2(194) Android/22 product/shamu vendor/OPPO model/OPPO R11 Plus  rom/android  network/wifi  platform/mobile nd/1";
 
-        private static readonly string _userAgent = _userAgentList[_random.Next(_userAgentList.Length)];
+        private const string ApiKey = "0dad551ec0f84ed02907ff5c42e8ec70";
 
-        public DoubanAccessor(IHttpClient client, ILogger logger)
-            : this(client, logger, 2000)
-        {
-        }
+        private const string SecretKey = "bf7dddc7c9cfe6f7";
+
+        private static readonly string Host = "https://frodo.douban.com";
+
+        public DoubanAccessor(IHttpClient client, ILogger logger) : this(client, logger, 2000) { }
 
         public DoubanAccessor(IHttpClient client, ILogger logger, int minRequestInternalMs)
         {
@@ -53,31 +43,30 @@ namespace Jellyfin.Plugin.Douban
             _minRequestInternalMs = minRequestInternalMs;
         }
 
-        public async Task<String> GetResponse(string url, CancellationToken cancellationToken)
+        public async Task<String> Request(string api, Dictionary<String, String> queryParams, CancellationToken cancellationToken)
         {
+            string ts = GetTs();
+            StringBuilder sb = new StringBuilder();
+            sb.Append("GET");
+            sb.Append($"&{UpperCaseUrlEncode(api)}");
+            sb.Append($"&{ts}");
+            string sig = GetSig(sb.ToString());
+
+            queryParams.Add("_ts", ts);
+            queryParams.Add("_sig", sig);
+            queryParams.Add("apikey", ApiKey);
+
+            string query = GenQueryString(queryParams);
+
             var options = new HttpRequestOptions
             {
-                Url = url,
+                Url = $"{Host}{api}{query}",
                 CancellationToken = cancellationToken,
                 BufferContent = true,
-                UserAgent = _userAgent,
+                UserAgent = UserAgent,
             };
 
-            if (!string.IsNullOrEmpty(_doubanBid))
-            {
-                options.RequestHeaders.Add("Cookie", String.Format("bid={0}", _doubanBid));
-            }
-
             using var response = await _httpClient.GetResponse(options).ConfigureAwait(false);
-
-            if (response.Headers.TryGetValues("X-DOUBAN-NEWBID", out IEnumerable<string> value))
-            {
-                lock (_doubanBid)
-                {
-                    _logger.LogInformation("Douban bid is: {0}", value.FirstOrDefault());
-                    _doubanBid = value.FirstOrDefault();
-                }
-            }
 
             using var reader = new StreamReader(response.Content);
             String content = reader.ReadToEnd();
@@ -86,7 +75,7 @@ namespace Jellyfin.Plugin.Douban
         }
 
         // Delays for some time to reduce the access frequency.
-        public async Task<String> GetResponseWithDelay(string url, CancellationToken cancellationToken)
+        public async Task<String> GetResponseWithDelay(string url, Dictionary<String, String> queryParams, CancellationToken cancellationToken)
         {
             await _locker.WaitAsync();
             try
@@ -103,7 +92,7 @@ namespace Jellyfin.Plugin.Douban
                     }
                 }
 
-                var content = await GetResponse(url, cancellationToken);
+                var content = await Request(url, queryParams, cancellationToken);
                 // Update last access time to now.
                 _lastAccessTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 return content;
@@ -112,6 +101,46 @@ namespace Jellyfin.Plugin.Douban
             {
                 _locker.Release();
             }
+        }
+
+        private string GetTs()
+        {
+            long ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000;
+            return $"{ts}";
+        }
+
+        private string GetSig(string input)
+        {
+            using var hmac1 = new HMACSHA1(Encoding.UTF8.GetBytes(SecretKey));
+            hmac1.Initialize();
+            byte[] data = hmac1.ComputeHash(Encoding.UTF8.GetBytes(input));
+
+            return Convert.ToBase64String(data);
+        }
+
+        private static string UpperCaseUrlEncode(string s)
+        {
+            char[] temp = HttpUtility.UrlEncode(s).ToCharArray();
+            for (int i = 0; i < temp.Length - 2; i++)
+            {
+                if (temp[i] == '%')
+                {
+                    temp[i + 1] = char.ToUpper(temp[i + 1]);
+                    temp[i + 2] = char.ToUpper(temp[i + 2]);
+                }
+            }
+            return new string(temp);
+        }
+
+        private static string GenQueryString(Dictionary<string, string> queryParams)
+        {
+            // StringBuilder sb = new StringBuilder("?");
+            List<string> temp = new List<string>();
+            foreach (KeyValuePair<string, string> entry in queryParams)
+            {
+                temp.Add($"{UpperCaseUrlEncode(entry.Key)}={UpperCaseUrlEncode(entry.Value)}");
+            }
+            return "?" + String.Join("&", temp);
         }
     }
 }
